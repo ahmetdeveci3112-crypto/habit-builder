@@ -1,11 +1,11 @@
-// src/App.jsx — Lifestyle Challenge (mobile 2x2 stats, full sticky header, drawer controls)
-// - Tam ekran + mobil uyum
-// - Sticky: üst header + istatistik şeridi + günler şeridi + sol "Hedef" sütunu
-// - Kontroller mobilde çekmece (drawer) içinde
-// - localStorage kalıcılık
-// - Supabase: email magic-link (şifresiz) oturum
-// - Oturum varken -> user_snapshots; yokken -> snapshots (device_id)
-// - Otomatik kayıt yok; sadece "Buluttan yükle / Buluta kaydet"
+// src/App.jsx — Lifestyle Challenge (REV: mobil 2×2 stats, 2‑yönlü senkron scroll, tam hizalama)
+// - Mobil uyumluluk güçlendirildi: dokunmatik hedefler büyütüldü, spacing ve kontrast iyileştirildi
+// - İstatistik kutuları (ilerleme boxları) mobilde 2×2 grid, md ve üstü 4 sütun
+// - Gün başlığı ve içerik HİÇ KAYMA olmadan iki yönlü senkron scroll
+// - Sol "Hedef" sütunu ile üst başlıktaki "Hedef" başlığı birebir genişlik eşleşmesi (ResizeObserver)
+// - Ortak sütun genişliği değişkenleri (CSS var): day width ve left col width
+// - Sticky header’lar ve yatay çizgiler sade, profesyonel görünüm için optimize edildi
+// - Perf: passive scroll dinleyicileri + rAF ile senkronizasyon
 
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { supabase } from './lib/supabase';
@@ -63,7 +63,6 @@ const DEFAULT_HABITS = [
 const STORAGE_KEY = 'lifestyle_challenge_state_v1';
 
 // -------------------- Supabase: Snapshot API --------------------
-// Cihaz bazlı
 async function saveDeviceSnapshot({ year, month, habits, data, title }) {
   const { error } = await supabase.from('snapshots').upsert(
     { device_id: DEVICE_ID, year, month, payload: { year, month, habits, data, title } },
@@ -83,7 +82,6 @@ async function loadDeviceSnapshot(year, month) {
   return row?.payload ?? null;
 }
 
-// Kullanıcı bazlı
 async function saveUserSnapshot(uid, { year, month, habits, data, title }) {
   const { error } = await supabase.from('user_snapshots').upsert(
     { user_id: uid, year, month, payload: { year, month, habits, data, title } },
@@ -121,10 +119,14 @@ export default function App() {
   const [syncInfo, setSyncInfo] = useState('');
   const [drawerOpen, setDrawerOpen] = useState(false);
 
-  // sticky başlıklara hizalama için liste alanı referansları
-  const headerRef = useRef(null);
-  const daysHeaderRef = useRef(null);
-  const scrollSyncRef = useRef(null);
+  // Ölçüm/senkron referansları
+  const daysHeaderRef = useRef(null);     // üst gün şeridi (yatay kaydırılır)
+  const bodyScrollRef = useRef(null);     // tablo gövdesi yatay kaydırıcı
+  const leftCellProbeRef = useRef(null);  // ilk sol hücreyi gözleyip genişlik ölçer
+
+  // Ortak genişlikler (CSS var). Başlangıç varsayılanları:
+  const [leftColW, setLeftColW] = useState(320); // px
+  const [dayColW] = useState(40);                // px — tüm gün sütunları eşit
 
   // --- Auth subscribe ---
   useEffect(() => {
@@ -263,7 +265,6 @@ export default function App() {
       if (user?.id) {
         payload = await loadUserSnapshot(user.id, year, month);
         if (!payload) {
-          // Fallback: device'tan al ve user'a kaydet
           const dev = await loadDeviceSnapshot(year, month);
           if (dev) {
             await saveUserSnapshot(user.id, dev);
@@ -348,23 +349,53 @@ export default function App() {
           setHabits(Array.isArray(payload.habits) ? payload.habits : DEFAULT_HABITS);
           setData(payload.data ?? {});
         } else {
-          // veri yoksa sadece datayı boşla, hedefleri koru
           setData({});
         }
       } catch (e) { console.error(e); }
     })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [year, month, user?.id]);
 
-  // --- Scroll sync: gün başlığı ile içerik yatay senkron ---
+  // --- Sol sütun genişliği ölçümü (header ile birebir eşleşme) ---
   useEffect(() => {
-    const scrollable = scrollSyncRef.current;
-    const daysHead = daysHeaderRef.current;
-    if (!scrollable || !daysHead) return;
+    if (!leftCellProbeRef.current) return;
+    const el = leftCellProbeRef.current;
+    const obs = new ResizeObserver(() => {
+      // scrollWidth ile padding/border dahil genişlik al
+      const w = Math.ceil(el.getBoundingClientRect().width);
+      setLeftColW(w);
+    });
+    obs.observe(el);
+    return () => obs.disconnect();
+  }, [habits.length]);
 
-    const onScroll = () => { daysHead.scrollLeft = scrollable.scrollLeft; };
-    scrollable.addEventListener('scroll', onScroll, { passive: true });
-    return () => scrollable.removeEventListener('scroll', onScroll);
+  // --- İki yönlü yatay scroll senkronizasyonu ---
+  useEffect(() => {
+    const head = daysHeaderRef.current;
+    const body = bodyScrollRef.current;
+    if (!head || !body) return;
+
+    let syncing = false;
+    const sync = (from, to) => {
+      if (syncing) return;
+      syncing = true;
+      const x = from.scrollLeft;
+      // rAF ile hassas eşleme + mobilde akıcılık
+      requestAnimationFrame(() => {
+        to.scrollLeft = x;
+        syncing = false;
+      });
+    };
+
+    const onHead = () => sync(head, body);
+    const onBody = () => sync(body, head);
+
+    head.addEventListener('scroll', onHead, { passive: true });
+    body.addEventListener('scroll', onBody, { passive: true });
+
+    return () => {
+      head.removeEventListener('scroll', onHead);
+      body.removeEventListener('scroll', onBody);
+    };
   }, []);
 
   // -------------------- Auth Fonksiyonları --------------------
@@ -376,20 +407,19 @@ export default function App() {
     if (error) throw error;
     alert('Giriş linki e-postana gönderildi.');
   }
-  async function signOut() {
-    await supabase.auth.signOut();
-  }
+  async function signOut() { await supabase.auth.signOut(); }
 
   // -------------------- Render --------------------
   return (
-    <div className="min-h-dvh bg-neutral-950 text-neutral-100">
+    <div className="min-h-dvh bg-neutral-950 text-neutral-100" style={{
+      // Ortak genişlik değişkenlerini köke yazıyoruz
+      ['--day-w']: `${dayColW}px`,
+      ['--left-w']: `${leftColW}px`,
+    }}>
       {/* Sticky Header (tam şerit, blur) */}
-      <div
-        ref={headerRef}
-        className="sticky top-0 z-50 backdrop-blur-md bg-neutral-950/70 border-b border-neutral-800"
-      >
+      <div className="sticky top-0 z-50 backdrop-blur-md bg-neutral-950/70 border-b border-neutral-800">
         <div className="mx-auto max-w-[1400px] px-3 sm:px-4 md:px-6 py-3 gap-3 flex items-center justify-between">
-          <h1 className="text-xl sm:text-2xl font-semibold">{title}</h1>
+          <h1 className="text-lg sm:text-2xl font-semibold truncate pr-2">{title}</h1>
 
           {/* Masaüstü kontroller */}
           <div className="hidden md:flex items-center gap-2">
@@ -404,7 +434,7 @@ export default function App() {
             </select>
             <input
               type="number"
-              className="bg-neutral-900 border border-neutral-700 rounded-xl px-3 py-2 w-[86px]"
+              className="bg-neutral-900 border border-neutral-700 rounded-xl px-3 py-2 w-[90px]"
               value={year}
               onChange={(e) => setYear(Number(e.target.value))}
             />
@@ -420,13 +450,7 @@ export default function App() {
             <button onClick={handleCloudLoad} className="btn-ghost">Buluttan yükle</button>
             <button onClick={handleCloudSave} className="btn-primary">Buluta kaydet</button>
 
-            <AuthPanel
-              onSignIn={signInWithEmail}
-              onSignOut={signOut}
-              session={session}
-              user={user}
-              compact
-            />
+            <AuthPanel onSignIn={signInWithEmail} onSignOut={signOut} session={session} user={user} compact />
           </div>
 
           {/* Mobil Menü butonu */}
@@ -439,7 +463,7 @@ export default function App() {
           </button>
         </div>
 
-        {/* İstatistikler: mobilde 2×2, md’de 4 sütun */}
+        {/* İstatistikler: mobil 2×2, md’de 4 sütun */}
         <div className="mx-auto max-w-[1400px] px-3 sm:px-4 md:px-6 pb-3">
           <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
             <StatCard label="Gün sayısı" value={dim} />
@@ -458,17 +482,18 @@ export default function App() {
         </div>
 
         {/* Günler başlığı (sticky) */}
-        <div
-          ref={daysHeaderRef}
-          className="sticky top-[calc(0px)] z-40 border-t border-neutral-800 bg-neutral-950/80 backdrop-blur-md"
-        >
-          <div className="mx-auto max-w-[1400px] px-3 sm:px-4 md:px-6 py-2 overflow-x-auto">
-            <div className="min-w-[900px] flex items-center">
-              <div className="text-sm text-neutral-400 w-[320px] shrink-0">Hedef</div>
-              <div className="flex-1 flex items-center gap-6 text-sm text-neutral-300">
-                {Array.from({ length: dim }, (_, i) => (
-                  <div key={i} className="w-10 text-center">{i + 1}</div>
-                ))}
+        <div className="sticky top-0 z-40 border-t border-neutral-800 bg-neutral-950/80 backdrop-blur-md">
+          <div className="mx-auto max-w-[1400px] px-3 sm:px-4 md:px-6 py-2 overflow-x-auto" ref={daysHeaderRef} style={{ WebkitOverflowScrolling: 'touch', willChange: 'scroll-position' }}>
+            <div className="min-w-[900px] flex items-center" style={{ columnGap: '1.5rem' }}>
+              {/* Sol başlık: genişliği ölçülen sol hücre ile aynı */}
+              <div className="text-sm text-neutral-400 shrink-0" style={{ width: 'var(--left-w)' }}>Hedef</div>
+              {/* Gün numaraları */}
+              <div className="flex-1 flex items-center text-sm text-neutral-300" style={{ columnGap: '1.5rem' }}>
+                <div className="flex items-center">
+                  {Array.from({ length: dim }, (_, i) => (
+                    <div key={i} className="text-center" style={{ width: 'var(--day-w)' }}>{i + 1}</div>
+                  ))}
+                </div>
                 <div className="w-16 text-right">%Tamam</div>
               </div>
             </div>
@@ -478,27 +503,24 @@ export default function App() {
 
       {/* Sync status */}
       {syncInfo && (
-        <div className="mx-auto max-w-[1400px] px-3 sm:px-4 md:px-6 pt-2 text-xs text-neutral-400">
-          • {syncInfo}
-        </div>
+        <div className="mx-auto max-w-[1400px] px-3 sm:px-4 md:px-6 pt-2 text-xs text-neutral-400">• {syncInfo}</div>
       )}
 
       {/* GRID */}
       <div className="mx-auto max-w-[1400px] px-3 sm:px-4 md:px-6 mt-2">
         <div className="w-full overflow-x-auto rounded-2xl border border-neutral-800">
-          {/* İçerik yatay kaydırılabilir ve gün başlığı ile senkron */}
-          <div ref={scrollSyncRef} className="overflow-x-auto">
+          <div ref={bodyScrollRef} className="overflow-x-auto" style={{ WebkitOverflowScrolling: 'touch', willChange: 'scroll-position' }}>
             <table className="w-full md:min-w-[1100px]">
               <tbody>
-                {habits.map((h) => (
+                {habits.map((h, idx) => (
                   <tr key={h.id} className="odd:bg-neutral-950 even:bg-neutral-900/40 border-t border-neutral-900">
                     {/* Sol Hedef Hücresi (sticky left) */}
-                    <td className="px-3 py-2 align-top sticky left-0 z-10 bg-neutral-950 w-[320px]">
-                      <div className="font-medium leading-tight">{h.title}</div>
-                      <div className="text-xs text-neutral-400">
+                    <td className="px-3 py-2 align-top sticky left-0 z-10 bg-neutral-950" ref={idx===0?leftCellProbeRef:undefined} style={{ width: 'var(--left-w)' }}>
+                      <div className="font-medium leading-tight text-base md:text-[15px]">{h.title}</div>
+                      <div className="text-xs text-neutral-400 mt-0.5">
                         Birim: {UNIT_TYPES.find(u=>u.id===h.unit)?.label} · Hedef: {h.target}
                       </div>
-                      <div className="mt-1 flex gap-2">
+                      <div className="mt-2 flex gap-2">
                         <button onClick={() => setEditingHabit(h)} className="text-xs inline-flex items-center gap-1 px-2 py-1 rounded-lg border border-neutral-700 hover:bg-neutral-800">Düzenle</button>
                         <button onClick={() => removeHabit(h.id)} className="text-xs inline-flex items-center gap-1 px-2 py-1 rounded-lg border border-red-700/70 text-red-300 hover:bg-red-900/20">Sil</button>
                       </div>
@@ -506,7 +528,7 @@ export default function App() {
 
                     {/* Gün hücreleri */}
                     <td className="px-0 py-0">
-                      <div className="flex items-center gap-6 pr-4">
+                      <div className="flex items-center pr-4" style={{ columnGap: '1.5rem' }}>
                         {/* Günler */}
                         <div className="flex items-center">
                           {Array.from({ length: dim }, (_, i) => {
@@ -515,16 +537,17 @@ export default function App() {
                             const score = scoreFor(h, day);
                             const isToday = year === ty && month === tm && day === td;
                             return (
-                              <div key={day} className="w-10 flex justify-center py-1">
+                              <div key={day} className="flex justify-center py-1" style={{ width: 'var(--day-w)' }}>
                                 <button
                                   onClick={() => setCell(h.id, day, cycleValue(h, val))}
                                   onContextMenu={(e) => { e.preventDefault(); setCell(h.id, day, null); }}
-                                  className={`w-9 h-8 rounded-lg border text-sm select-none ${
+                                  className={`w-9 h-9 md:h-8 rounded-lg border text-sm select-none touch-manipulation ${
                                     score >= 1 ? 'bg-green-600/30 border-green-600/60'
                                     : score > 0 ? 'bg-amber-600/20 border-amber-600/50'
                                     : 'bg-neutral-900 border-neutral-800'
                                   } ${isToday ? 'ring-2 ring-blue-500' : ''}`}
                                   title="Sol tık: artır / sağ tık: temizle"
+                                  aria-label={`Gün ${day} değeri`}
                                 >
                                   {h.unit === 'check' ? (val ? '✓' : '') : (val ?? '')}
                                 </button>
@@ -556,7 +579,7 @@ export default function App() {
         </div>
 
         <div className="mt-6 text-sm text-neutral-400">
-          İpucu: Hücreye tıklayınca değer artar, sağ tıkla temizlenir. %80 ve üzeri günler streak sayılır.
+          İpucu: Hücreye dokununca değer artar, basılı tutma yok; sağ tık/uzun basış ile temizle. %80 ve üzeri günler streak sayılır.
         </div>
       </div>
 
@@ -608,10 +631,7 @@ function StatCard({ label, value, progress }) {
       <div className="text-xl sm:text-2xl font-semibold mt-1">{value}</div>
       {typeof progress === 'number' && (
         <div className="mt-2 h-2 rounded-full bg-neutral-800 overflow-hidden">
-          <div
-            className="h-2 rounded-full bg-blue-500"
-            style={{ width: `${Math.max(0, Math.min(100, progress))}%` }}
-          />
+          <div className="h-2 rounded-full bg-blue-500" style={{ width: `${Math.max(0, Math.min(100, progress))}%` }} />
         </div>
       )}
     </div>
@@ -665,7 +685,7 @@ function SettingsPanel({ onClose }) {
         </div>
         <div className="space-y-2 text-sm text-neutral-300">
           <p>• Veriler tarayıcıda <b>localStorage</b>'da saklanır. JSON dışa aktarım ile yedek alabilirsin.</p>
-          <p>• Hücreye <b>sol tık</b> → artır; <b>sağ tık</b> → temizle.</p>
+          <p>• Hücreye <b>dokun</b> → artır; <b>sağ tık / uzun bas</b> → temizle.</p>
           <p>• Streak: Gün ortalaması ≥%80 olduğunda ardışık gün sayısı artar.</p>
         </div>
       </div>
@@ -678,7 +698,7 @@ function AuthPanel({ onSignIn, onSignOut, session, user, compact }) {
   if (session) {
     return (
       <div className={`flex items-center gap-2 ${compact ? 'text-sm' : ''}`}>
-        <span className="text-sm text-neutral-300">{user?.email}</span>
+        <span className="text-sm text-neutral-300 truncate max-w-[200px]">{user?.email}</span>
         <span className="text-xs px-2 py-1 rounded-lg border border-green-600/50 text-green-300">Bulut: Kullanıcı</span>
         <button onClick={onSignOut} className="px-3 py-2 rounded-xl bg-neutral-900 border border-neutral-700 hover:bg-neutral-800">Çıkış</button>
       </div>
@@ -693,12 +713,7 @@ function AuthPanel({ onSignIn, onSignOut, session, user, compact }) {
         className="bg-neutral-900 border border-neutral-700 rounded-xl px-3 py-2"
       />
       <span className="text-xs px-2 py-1 rounded-lg border border-neutral-600/50 text-neutral-300">Bulut: Cihaz</span>
-      <button
-        onClick={()=>email && onSignIn(email)}
-        className="px-3 py-2 rounded-xl bg-blue-600 text-white hover:bg-blue-500"
-      >
-        Giriş linki gönder
-      </button>
+      <button onClick={()=>email && onSignIn(email)} className="px-3 py-2 rounded-xl bg-blue-600 text-white hover:bg-blue-500">Giriş linki gönder</button>
     </div>
   );
 }
@@ -721,29 +736,16 @@ function MobileControls({
         <div className="grid gap-3">
           <label className="grid gap-1">
             <span className="text-sm text-neutral-300">Başlık</span>
-            <input
-              value={title}
-              onChange={(e)=>setTitle(e.target.value)}
-              className="bg-neutral-900 border border-neutral-700 rounded-xl px-3 py-2"
-            />
+            <input value={title} onChange={(e)=>setTitle(e.target.value)} className="bg-neutral-900 border border-neutral-700 rounded-xl px-3 py-2" />
           </label>
 
           <div className="flex gap-2">
-            <select
-              className="bg-neutral-900 border border-neutral-700 rounded-xl px-3 py-2 flex-1"
-              value={month}
-              onChange={(e) => setMonth(Number(e.target.value))}
-            >
+            <select className="bg-neutral-900 border border-neutral-700 rounded-xl px-3 py-2 flex-1" value={month} onChange={(e) => setMonth(Number(e.target.value))}>
               {Array.from({ length: 12 }, (_, i) => (
                 <option key={i} value={i}>{monthNameTR(i)}</option>
               ))}
             </select>
-            <input
-              type="number"
-              className="bg-neutral-900 border border-neutral-700 rounded-xl px-3 py-2 w-28"
-              value={year}
-              onChange={(e) => setYear(Number(e.target.value))}
-            />
+            <input type="number" className="bg-neutral-900 border border-neutral-700 rounded-xl px-3 py-2 w-28" value={year} onChange={(e) => setYear(Number(e.target.value))} />
           </div>
 
           <div className="flex gap-2">
@@ -769,18 +771,8 @@ function MobileControls({
             </div>
           ) : (
             <div className="mt-2 grid gap-2">
-              <input
-                value={email}
-                onChange={(e)=>setEmail(e.target.value)}
-                placeholder="email@ornek.com"
-                className="bg-neutral-900 border border-neutral-700 rounded-xl px-3 py-2"
-              />
-              <button
-                onClick={()=>email && onSignIn(email)}
-                className="px-3 py-2 rounded-xl bg-blue-600 text-white hover:bg-blue-500"
-              >
-                Giriş linki gönder
-              </button>
+              <input value={email} onChange={(e)=>setEmail(e.target.value)} placeholder="email@ornek.com" className="bg-neutral-900 border border-neutral-700 rounded-xl px-3 py-2" />
+              <button onClick={()=>email && onSignIn(email)} className="px-3 py-2 rounded-xl bg-blue-600 text-white hover:bg-blue-500">Giriş linki gönder</button>
               <div className="text-xs text-neutral-400">Bulut modu yoksa cihaz modunda çalışırsın.</div>
             </div>
           )}
@@ -790,26 +782,24 @@ function MobileControls({
   );
 }
 
-/* -------- Küçük yardımcı buton stilleri (Tailwind kompozit sınıflar) --------
-   index.css'te yoksa eklemene gerek yok; utility sınıflardan oluşuyor. */
-function BtnBase({ className = '', ...props }) {
-  return <button className={`inline-flex items-center gap-2 rounded-xl px-3 py-2 ${className}`} {...props} />;
-}
-function Ghost(props){ return <BtnBase className="bg-neutral-900 border border-neutral-700 hover:bg-neutral-800" {...props}/>; }
-function Primary(props){ return <BtnBase className="bg-blue-600 text-white hover:bg-blue-500" {...props}/>; }
-
-// Tailwind-like kısayollar (JSX’te className ile kullandık)
+// -------- Küçük yardımcı buton stilleri --------
 const btn = {
   ghost: 'inline-flex items-center gap-2 bg-neutral-900 border border-neutral-700 rounded-xl px-3 py-2 hover:bg-neutral-800',
   primary: 'inline-flex items-center gap-2 bg-blue-600 text-white rounded-xl px-3 py-2 hover:bg-blue-500'
 };
-// küçük sugar:
 function Button({ variant='ghost', className='', ...rest }) {
   return <button className={`${btn[variant]} ${className}`} {...rest} />;
 }
-// kullanımlar:
+
+// Utility class alias: JSX içinde kullandık
 const btnGhost = btn.ghost;
 const btnPrimary = btn.primary;
 
-// className kısa isimleri (üstte kullandık)
+// className sugar
 function cls() {}
+
+/* Not: Tailwind varsayılarak yazıldı. Ek olarak sticky başlık kayması yaşamamak için
+   hem başlıkta hem gövdede ortak CSS değişkenleri kullanıyoruz:
+   --left-w : Sol "Hedef" sütunu genişliği
+   --day-w  : Gün sütunu genişliği (tüm günlerde sabit)
+   - Üst başlık ve gövde yatay scrollda iki yönlü senkronize. */
