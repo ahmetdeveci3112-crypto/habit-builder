@@ -1,33 +1,49 @@
-// src/App.jsx — Lifestyle Challenge (Rev: sticky+mobile drawer, manual cloud sync)
+// src/App.jsx — Lifestyle Challenge (mobile 2x2 stats, full sticky header, drawer controls)
+// - Tam ekran + mobil uyum
+// - Sticky: üst header + istatistik şeridi + günler şeridi + sol "Hedef" sütunu
+// - Kontroller mobilde çekmece (drawer) içinde
+// - localStorage kalıcılık
+// - Supabase: email magic-link (şifresiz) oturum
+// - Oturum varken -> user_snapshots; yokken -> snapshots (device_id)
+// - Otomatik kayıt yok; sadece "Buluttan yükle / Buluta kaydet"
 
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { supabase } from './lib/supabase';
 
-// ========================= Helpers & Consts =========================
+// -------------------- Yardımcılar --------------------
 const UNIT_TYPES = [
-  { id: 'check',   label: 'Checkbox' },
-  { id: 'count',   label: 'Adet' },
+  { id: 'check', label: 'Checkbox' },
+  { id: 'count', label: 'Adet' },
   { id: 'minutes', label: 'Dakika' },
-  { id: 'ml',      label: 'mL' },
-  { id: 'grams',   label: 'Gram' },
+  { id: 'ml', label: 'mL' },
+  { id: 'grams', label: 'Gram' },
 ];
 
-function daysInMonth(year, monthIndex) { return new Date(year, monthIndex + 1, 0).getDate(); }
-function monthNameTR(i) {
-  return ['Ocak','Şubat','Mart','Nisan','Mayıs','Haziran','Temmuz','Ağustos','Eylül','Ekim','Kasım','Aralık'][i];
+function daysInMonth(year, monthIndex) {
+  return new Date(year, monthIndex + 1, 0).getDate();
 }
-function today() {
-  const n = new Date(); return { y: n.getFullYear(), m: n.getMonth(), d: n.getDate() };
+function todayParts() {
+  const now = new Date();
+  return { y: now.getFullYear(), m: now.getMonth(), d: now.getDate() };
+}
+function monthNameTR(idx) {
+  return ['Ocak','Şubat','Mart','Nisan','Mayıs','Haziran','Temmuz','Ağustos','Eylül','Ekim','Kasım','Aralık'][idx];
 }
 function getDeviceId() {
   try {
     let id = localStorage.getItem('lc_device_id');
-    if (!id) { id = crypto?.randomUUID?.() ?? ('dev-' + Math.random().toString(36).slice(2)); localStorage.setItem('lc_device_id', id); }
+    if (!id) {
+      id = (typeof crypto !== 'undefined' && crypto.randomUUID)
+        ? crypto.randomUUID()
+        : 'dev-' + Math.random().toString(36).slice(2);
+      localStorage.setItem('lc_device_id', id);
+    }
     return id;
-  } catch { return 'dev-' + Math.random().toString(36).slice(2); }
+  } catch {
+    return 'dev-' + Math.random().toString(36).slice(2);
+  }
 }
 const DEVICE_ID = getDeviceId();
-const STORAGE_KEY = 'lifestyle_challenge_state_v2';
 
 const DEFAULT_HABITS = [
   { id: 'wakeBefore9',   title: "9'dan önce kalk",           unit: 'check',   target: 1 },
@@ -44,8 +60,10 @@ const DEFAULT_HABITS = [
   { id: 'alcohol',       title: 'Alkol (kadeh)',             unit: 'count',   target: 0 },
 ];
 
-// ========================= Supabase I/O =========================
-// device snapshots
+const STORAGE_KEY = 'lifestyle_challenge_state_v1';
+
+// -------------------- Supabase: Snapshot API --------------------
+// Cihaz bazlı
 async function saveDeviceSnapshot({ year, month, habits, data, title }) {
   const { error } = await supabase.from('snapshots').upsert(
     { device_id: DEVICE_ID, year, month, payload: { year, month, habits, data, title } },
@@ -57,138 +75,149 @@ async function loadDeviceSnapshot(year, month) {
   const { data: row, error } = await supabase
     .from('snapshots')
     .select('payload')
-    .eq('device_id', DEVICE_ID).eq('year', year).eq('month', month).maybeSingle();
+    .eq('device_id', DEVICE_ID)
+    .eq('year', year)
+    .eq('month', month)
+    .maybeSingle();
   if (error) throw error;
   return row?.payload ?? null;
 }
 
-// user snapshots
-async function saveUserSnapshot(userId, { year, month, habits, data, title }) {
+// Kullanıcı bazlı
+async function saveUserSnapshot(uid, { year, month, habits, data, title }) {
   const { error } = await supabase.from('user_snapshots').upsert(
-    { user_id: userId, year, month, payload: { year, month, habits, data, title } },
+    { user_id: uid, year, month, payload: { year, month, habits, data, title } },
     { onConflict: 'user_id,year,month' }
   );
   if (error) throw error;
 }
-async function loadUserSnapshot(userId, year, month) {
+async function loadUserSnapshot(uid, year, month) {
   const { data: row, error } = await supabase
     .from('user_snapshots')
     .select('payload')
-    .eq('user_id', userId).eq('year', year).eq('month', month).maybeSingle();
+    .eq('user_id', uid)
+    .eq('year', year)
+    .eq('month', month)
+    .maybeSingle();
   if (error) throw error;
   return row?.payload ?? null;
 }
-async function migrateAllDeviceSnapshotsToUser(userId) {
-  const { data: dev, error } = await supabase
-    .from('snapshots')
-    .select('year,month,payload')
-    .eq('device_id', DEVICE_ID);
-  if (error) throw error;
-  if (!dev?.length) return 0;
-  const up = dev.map(r => ({ user_id: userId, year: r.year, month: r.month, payload: r.payload }));
-  const { error: upErr } = await supabase.from('user_snapshots').upsert(up, { onConflict: 'user_id,year,month' });
-  if (upErr) throw upErr;
-  return up.length;
-}
 
-// ========================= App =========================
 export default function App() {
-  const { y: TY, m: TM, d: TD } = today();
+  const { y: ty, m: tm, d: td } = todayParts();
 
-  // auth
+  // Auth
   const [session, setSession] = useState(null);
   const [user, setUser] = useState(null);
 
-  // ui & data
-  const [title, setTitle] = useState('Lifestyle Challenge');
-  const [year, setYear] = useState(TY);
-  const [month, setMonth] = useState(TM);
+  // UI + veri
+  const [year, setYear] = useState(ty);
+  const [month, setMonth] = useState(tm); // 0-11
   const [habits, setHabits] = useState(DEFAULT_HABITS);
   const [data, setData] = useState({});
-  const [syncInfo, setSyncInfo] = useState('');
+  const [title, setTitle] = useState('Lifestyle Challenge');
   const [editingHabit, setEditingHabit] = useState(null);
-
-  // mobile drawer
+  const [showSettings, setShowSettings] = useState(false);
+  const [syncInfo, setSyncInfo] = useState('');
   const [drawerOpen, setDrawerOpen] = useState(false);
 
-  // sticky sync (tek container)
-  const scrollRef = useRef(null);
+  // sticky başlıklara hizalama için liste alanı referansları
+  const headerRef = useRef(null);
+  const daysHeaderRef = useRef(null);
+  const scrollSyncRef = useRef(null);
 
-  const dim = daysInMonth(year, month);
-
-  // ---------- Auth wiring ----------
+  // --- Auth subscribe ---
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => {
-      setSession(data?.session ?? null);
-      setUser(data?.session?.user ?? null);
+      setSession(data.session || null);
+      setUser(data.session?.user || null);
     });
-    const { data: sub } = supabase.auth.onAuthStateChange((_e, sess) => {
-      setSession(sess ?? null); setUser(sess?.user ?? null);
+    const { data: sub } = supabase.auth.onAuthStateChange((_evt, sess) => {
+      setSession(sess || null);
+      setUser(sess?.user || null);
     });
-    return () => sub?.subscription?.unsubscribe?.();
+    return () => sub.subscription.unsubscribe();
   }, []);
 
-  // oturum açınca cihaz kayıtlarını user'a taşı + mevcut ayı getir
-  useEffect(() => {
-    (async () => {
-      if (!user?.id) return;
-      try {
-        const moved = await migrateAllDeviceSnapshotsToUser(user.id);
-        if (moved) setSyncInfo(`Cihazdan hesaba ${moved} kayıt taşındı`);
-        const payload = await loadUserSnapshot(user.id, year, month);
-        if (payload) hydrateFromPayload(payload);
-      } catch (e) { console.error(e); }
-    })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [user?.id]);
-
-  // ---------- Local persistence ----------
+  // --- localStorage load/save ---
   useEffect(() => {
     try {
       const raw = localStorage.getItem(STORAGE_KEY);
       if (!raw) return;
-      const p = JSON.parse(raw);
-      if (p?.title) setTitle(p.title);
-      if (p?.year) setYear(p.year);
-      if (typeof p?.month === 'number') setMonth(p.month);
-      if (Array.isArray(p?.habits)) setHabits(p.habits);
-      if (p?.data) setData(p.data);
+      const parsed = JSON.parse(raw);
+      if (parsed.year) setYear(parsed.year);
+      if (typeof parsed.month === 'number') setMonth(parsed.month);
+      if (Array.isArray(parsed.habits)) setHabits(parsed.habits);
+      if (parsed.data) setData(parsed.data);
+      if (parsed.title) setTitle(parsed.title);
     } catch {}
   }, []);
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify({ title, year, month, habits, data }));
-  }, [title, year, month, habits, data]);
+    localStorage.setItem(
+      STORAGE_KEY,
+      JSON.stringify({ year, month, habits, data, title })
+    );
+  }, [year, month, habits, data, title]);
 
-  // ---------- Month/Year change → load user/device or clear ----------
-  useEffect(() => {
-    (async () => {
-      const uid = user?.id;
-      try {
-        let payload = null;
-        if (uid) payload = await loadUserSnapshot(uid, year, month);
-        else payload = await loadDeviceSnapshot(year, month);
-        if (payload) hydrateFromPayload(payload);
-        else clearOnlyData(); // alışkanlıklar kalsın, bu ay boş
-      } catch (e) {
-        console.error(e);
-      }
-    })();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [year, month, user?.id]);
+  const dim = daysInMonth(year, month);
 
-  // ---------- helpers (state ops) ----------
-  function hydrateFromPayload(payload) {
-    setTitle(payload.title ?? 'Lifestyle Challenge');
-    setHabits(Array.isArray(payload.habits) ? payload.habits : DEFAULT_HABITS);
-    setData(payload.data ?? {});
-  }
-  function clearOnlyData() {
-    setData({});
-  }
+  // --- Hücre yardımcıları ---
   function getCell(hid, day) { return data?.[hid]?.[day] ?? null; }
   function setCell(hid, day, value) {
     setData(prev => ({ ...prev, [hid]: { ...(prev[hid] || {}), [day]: value } }));
   }
+
+  function clearMonth() {
+    if (!confirm('Bu ayın tüm işaretlemelerini silmek istiyor musun?')) return;
+    const cloned = { ...data };
+    habits.forEach(h => {
+      if (cloned[h.id]) {
+        const c = { ...cloned[h.id] };
+        for (let d = 1; d <= dim; d++) delete c[d];
+        cloned[h.id] = c;
+      }
+    });
+    setData(cloned);
+  }
+
+  function exportJSON() {
+    const blob = new Blob(
+      [JSON.stringify({ year, month, habits, data, title }, null, 2)],
+      { type: 'application/json' }
+    );
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${title.replace(/\s+/g, '_')}_${year}-${String(month + 1).padStart(2, '0')}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+  function importJSON(file) {
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const obj = JSON.parse(String(reader.result));
+        if (obj.title) setTitle(obj.title);
+        if (obj.year) setYear(obj.year);
+        if (typeof obj.month === 'number') setMonth(obj.month);
+        if (Array.isArray(obj.habits)) setHabits(obj.habits);
+        if (obj.data) setData(obj.data);
+      } catch { alert('Geçersiz JSON'); }
+    };
+    reader.readAsText(file);
+  }
+
+  function addHabit() {
+    const base = { id: `habit_${Date.now()}`, title: 'Yeni hedef', unit: 'check', target: 1 };
+    setHabits(h => [...h, base]);
+    setEditingHabit(base);
+  }
+  function removeHabit(id) {
+    if (!confirm('Bu hedefi silmek istiyor musun?')) return;
+    setHabits(prev => prev.filter(h => h.id !== id));
+    setData(prev => { const c = { ...prev }; delete c[id]; return c; });
+  }
+
   function cycleValue(habit, current) {
     if (habit.unit === 'check')   return current ? 0 : 1;
     if (habit.unit === 'count')   return (Number(current) || 0) + 1;
@@ -197,25 +226,17 @@ export default function App() {
     if (habit.unit === 'grams')   return (Number(current) || 0) + 10;
     return current;
   }
-  function removeHabit(id) {
-    if (!confirm('Bu hedefi silmek istiyor musun?')) return;
-    setHabits(prev => prev.filter(h => h.id !== id));
-    setData(prev => { const c = { ...prev }; delete c[id]; return c; });
-  }
-  function addHabit() {
-    const base = { id: `habit_${Date.now()}`, title: 'Yeni hedef', unit: 'check', target: 1 };
-    setHabits(h => [...h, base]); setEditingHabit(base);
-  }
 
   function scoreFor(habit, day) {
     const v = getCell(habit.id, day);
     if (v == null) return 0;
     if (habit.unit === 'check') return v ? 1 : 0;
-    if (['count','minutes','ml','grams'].includes(habit.unit)) {
-      const t = Number(habit.target || 1); return Math.min(1, Number(v) / (t || 1));
+    if (['count', 'minutes', 'ml', 'grams'].includes(habit.unit)) {
+      return Math.min(1, Number(v) / Number(habit.target || 1));
     }
     return 0;
   }
+
   const dailyScores = useMemo(() => {
     const arr = [];
     for (let d = 1; d <= dim; d++) {
@@ -224,35 +245,129 @@ export default function App() {
     }
     return arr;
   }, [habits, data, dim]);
+
   function longestStreak() {
     let best = 0, cur = 0;
     for (let d = 1; d <= dim; d++) {
-      if (dailyScores[d - 1] >= 0.8) { cur += 1; best = Math.max(best, cur); } else cur = 0;
+      if (dailyScores[d - 1] >= 0.8) { cur += 1; best = Math.max(best, cur); }
+      else cur = 0;
     }
     return best;
   }
 
-  // ---------- Cloud ops (manual) ----------
-  async function handleCloudSave() {
-    try {
-      const payload = { title, year, month, habits, data };
-      if (user?.id) await saveUserSnapshot(user.id, payload);
-      else          await saveDeviceSnapshot(payload);
-      setSyncInfo('Buluta kaydedildi');
-    } catch (e) { console.error(e); setSyncInfo('Buluta kaydedilemedi'); }
-  }
+  // -------------------- Manuel Bulut İşlemleri --------------------
   async function handleCloudLoad() {
     try {
       let payload = null;
-      if (user?.id) payload = await loadUserSnapshot(user.id, year, month);
-      else          payload = await loadDeviceSnapshot(year, month);
+
+      if (user?.id) {
+        payload = await loadUserSnapshot(user.id, year, month);
+        if (!payload) {
+          // Fallback: device'tan al ve user'a kaydet
+          const dev = await loadDeviceSnapshot(year, month);
+          if (dev) {
+            await saveUserSnapshot(user.id, dev);
+            payload = dev;
+          }
+        }
+      } else {
+        payload = await loadDeviceSnapshot(year, month);
+      }
+
       if (!payload) { setSyncInfo('Kayıt bulunamadı'); return; }
-      hydrateFromPayload(payload);
+
+      setTitle(payload.title ?? 'Lifestyle Challenge');
+      setHabits(Array.isArray(payload.habits) ? payload.habits : DEFAULT_HABITS);
+      setData(payload.data ?? {});
       setSyncInfo('Buluttan yüklendi');
-    } catch (e) { console.error(e); setSyncInfo('Buluttan yüklenemedi'); }
+    } catch (e) {
+      console.error(e);
+      setSyncInfo('Buluttan yüklenemedi');
+    }
   }
 
-  // ---------- Auth ops ----------
+  async function migrateAllDeviceSnapshotsToUser(uid) {
+    const { data: devRows, error } = await supabase
+      .from('snapshots')
+      .select('year, month, payload')
+      .eq('device_id', DEVICE_ID);
+    if (error) throw error;
+    if (!devRows?.length) return 0;
+
+    const toUpsert = devRows.map(r => ({
+      user_id: uid,
+      year: r.year,
+      month: r.month,
+      payload: r.payload
+    }));
+    const { error: upErr } = await supabase
+      .from('user_snapshots')
+      .upsert(toUpsert, { onConflict: 'user_id,year,month' });
+    if (upErr) throw upErr;
+    return toUpsert.length;
+  }
+
+  async function handleCloudSave() {
+    try {
+      const payload = { year, month, habits, data, title };
+      if (user?.id) await saveUserSnapshot(user.id, payload);
+      else          await saveDeviceSnapshot(payload);
+      setSyncInfo('Buluta kaydedildi');
+    } catch (e) {
+      console.error(e);
+      setSyncInfo('Buluta kaydedilemedi');
+    }
+  }
+
+  // İlk oturum açıldığında: varsa device snapshot'ını user'a taşı ve o ayı yükle
+  useEffect(() => {
+    (async () => {
+      if (!user?.id) return;
+      try {
+        const moved = await migrateAllDeviceSnapshotsToUser(user.id);
+        if (moved) setSyncInfo(`Cihazdan hesaba ${moved} kayıt taşındı`);
+        const latest = await loadUserSnapshot(user.id, year, month);
+        if (latest) {
+          setTitle(latest.title ?? 'Lifestyle Challenge');
+          setHabits(Array.isArray(latest.habits) ? latest.habits : DEFAULT_HABITS);
+          setData(latest.data ?? {});
+        }
+      } catch (e) { console.error(e); }
+    })();
+  }, [user?.id]);
+
+  // --- Ay değişince ilgili veriyi getir (boşsa boş gelsin) ---
+  useEffect(() => {
+    (async () => {
+      try {
+        let payload = null;
+        if (user?.id) payload = await loadUserSnapshot(user.id, year, month);
+        else          payload = await loadDeviceSnapshot(year, month);
+        if (payload) {
+          setTitle(payload.title ?? 'Lifestyle Challenge');
+          setHabits(Array.isArray(payload.habits) ? payload.habits : DEFAULT_HABITS);
+          setData(payload.data ?? {});
+        } else {
+          // veri yoksa sadece datayı boşla, hedefleri koru
+          setData({});
+        }
+      } catch (e) { console.error(e); }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [year, month, user?.id]);
+
+  // --- Scroll sync: gün başlığı ile içerik yatay senkron ---
+  useEffect(() => {
+    const scrollable = scrollSyncRef.current;
+    const daysHead = daysHeaderRef.current;
+    if (!scrollable || !daysHead) return;
+
+    const onScroll = () => { daysHead.scrollLeft = scrollable.scrollLeft; };
+    scrollable.addEventListener('scroll', onScroll, { passive: true });
+    return () => scrollable.removeEventListener('scroll', onScroll);
+  }, []);
+
+  // -------------------- Auth Fonksiyonları --------------------
   async function signInWithEmail(email) {
     const { error } = await supabase.auth.signInWithOtp({
       email,
@@ -261,271 +376,251 @@ export default function App() {
     if (error) throw error;
     alert('Giriş linki e-postana gönderildi.');
   }
-  async function signOut() { await supabase.auth.signOut(); }
+  async function signOut() {
+    await supabase.auth.signOut();
+  }
 
-  // ========================= Render =========================
-  const isMobile = typeof window !== 'undefined' && window.matchMedia('(max-width: 768px)').matches;
-
+  // -------------------- Render --------------------
   return (
     <div className="min-h-dvh bg-neutral-950 text-neutral-100">
-      {/* Sticky Header (blur) */}
-      <div className="sticky top-0 z-40 backdrop-blur-md bg-neutral-950/70 border-b border-neutral-900">
-        <div className="mx-auto max-w-[1400px] px-3 sm:px-4 py-3">
-          <HeaderBar
-            title={title}
-            setTitle={setTitle}
-            year={year}
-            month={month}
-            setYear={setYear}
-            setMonth={setMonth}
-            session={session}
-            user={user}
-            onSignOut={signOut}
-            onOpenDrawer={() => setDrawerOpen(true)}
-            onCloudLoad={handleCloudLoad}
-            onCloudSave={handleCloudSave}
-            isMobile={isMobile}
-          />
-        </div>
+      {/* Sticky Header (tam şerit, blur) */}
+      <div
+        ref={headerRef}
+        className="sticky top-0 z-50 backdrop-blur-md bg-neutral-950/70 border-b border-neutral-800"
+      >
+        <div className="mx-auto max-w-[1400px] px-3 sm:px-4 md:px-6 py-3 gap-3 flex items-center justify-between">
+          <h1 className="text-xl sm:text-2xl font-semibold">{title}</h1>
 
-        {/* Sticky Metrics + Day header (tek scroll container ile hizalı) */}
-        <div className="mx-auto max-w-[1400px] px-3 sm:px-4 pb-3">
-          <div className="grid grid-cols-1 sm:grid-cols-4 gap-3">
-            <StatCard label="Gün sayısı" value={dim} />
-            <StatCard label="Ay ilerleme" value={
-              <Progress value={Math.round((dailyScores.filter(x=>x>0).length/dim)*100)} />
-            } />
-            <StatCard label="Ortalama gün skoru" value={
-              <Progress value={Math.round((dailyScores.reduce((a,b)=>a+b,0)/Math.max(1,dailyScores.length))*100)} />
-            } />
-            <StatCard label="En uzun streak (≥%80)" value={longestStreak()} />
+          {/* Masaüstü kontroller */}
+          <div className="hidden md:flex items-center gap-2">
+            <select
+              className="bg-neutral-900 border border-neutral-700 rounded-xl px-3 py-2"
+              value={month}
+              onChange={(e) => setMonth(Number(e.target.value))}
+            >
+              {Array.from({ length: 12 }, (_, i) => (
+                <option key={i} value={i}>{monthNameTR(i)}</option>
+              ))}
+            </select>
+            <input
+              type="number"
+              className="bg-neutral-900 border border-neutral-700 rounded-xl px-3 py-2 w-[86px]"
+              value={year}
+              onChange={(e) => setYear(Number(e.target.value))}
+            />
+
+            <button onClick={() => setShowSettings((s) => !s)} className="btn-ghost">Ayarlar</button>
+            <button onClick={exportJSON} className="btn-ghost">Dışa aktar</button>
+            <label className="btn-ghost cursor-pointer">
+              İçe aktar
+              <input type="file" accept="application/json" className="hidden" onChange={(e) => e.target.files?.[0] && importJSON(e.target.files[0])} />
+            </label>
+            <button onClick={clearMonth} className="btn-ghost">Ayı temizle</button>
+
+            <button onClick={handleCloudLoad} className="btn-ghost">Buluttan yükle</button>
+            <button onClick={handleCloudSave} className="btn-primary">Buluta kaydet</button>
+
+            <AuthPanel
+              onSignIn={signInWithEmail}
+              onSignOut={signOut}
+              session={session}
+              user={user}
+              compact
+            />
           </div>
 
-          {/* Gün başlığı row (sticky altında) */}
-          <div className="mt-3 overflow-hidden rounded-2xl border border-neutral-800">
-            <div className="bg-neutral-900">
-              <div className="grid grid-cols-[320px_1fr_80px]">
-                {/* sticky ilk kolon başlığı */}
-                <div className="px-3 py-2 text-sm text-neutral-300 sticky left-0 z-20 bg-neutral-900">Hedef</div>
-                {/* günler */}
-                <div className="overflow-x-hidden">
-                  <div className="flex">
-                    {Array.from({ length: dim }, (_, i) => (
-                      <div key={i} className="w-10 text-center px-1 py-2 text-xs text-neutral-300">{i+1}</div>
-                    ))}
-                  </div>
-                </div>
-                <div className="px-2 py-2 text-center text-xs text-neutral-300">%Tamam</div>
+          {/* Mobil Menü butonu */}
+          <button
+            className="md:hidden inline-flex items-center gap-2 px-3 py-2 rounded-xl bg-neutral-900 border border-neutral-700"
+            onClick={() => setDrawerOpen(true)}
+            aria-label="Menü"
+          >
+            <span>Menü</span>
+          </button>
+        </div>
+
+        {/* İstatistikler: mobilde 2×2, md’de 4 sütun */}
+        <div className="mx-auto max-w-[1400px] px-3 sm:px-4 md:px-6 pb-3">
+          <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
+            <StatCard label="Gün sayısı" value={dim} />
+            <StatCard
+              label="Ay ilerleme"
+              value={`${Math.round((dailyScores.filter((x)=>x>0).length/dim)*100)}%`}
+              progress={Math.round((dailyScores.filter((x)=>x>0).length/dim)*100)}
+            />
+            <StatCard
+              label="Ortalama gün skoru"
+              value={`${Math.round((dailyScores.reduce((a,b)=>a+b,0)/Math.max(1,dailyScores.length))*100)}%`}
+              progress={Math.round((dailyScores.reduce((a,b)=>a+b,0)/Math.max(1,dailyScores.length))*100)}
+            />
+            <StatCard label="En uzun streak (≥%80)" value={longestStreak()} />
+          </div>
+        </div>
+
+        {/* Günler başlığı (sticky) */}
+        <div
+          ref={daysHeaderRef}
+          className="sticky top-[calc(0px)] z-40 border-t border-neutral-800 bg-neutral-950/80 backdrop-blur-md"
+        >
+          <div className="mx-auto max-w-[1400px] px-3 sm:px-4 md:px-6 py-2 overflow-x-auto">
+            <div className="min-w-[900px] flex items-center">
+              <div className="text-sm text-neutral-400 w-[320px] shrink-0">Hedef</div>
+              <div className="flex-1 flex items-center gap-6 text-sm text-neutral-300">
+                {Array.from({ length: dim }, (_, i) => (
+                  <div key={i} className="w-10 text-center">{i + 1}</div>
+                ))}
+                <div className="w-16 text-right">%Tamam</div>
               </div>
             </div>
           </div>
         </div>
       </div>
 
-      {/* Body: grid satırları (başlıkla aynı genişlik, tek scroll) */}
-      <div className="mx-auto max-w-[1400px] px-3 sm:px-4 pb-10">
-        {syncInfo && <div className="text-xs text-neutral-400 mt-3">{syncInfo}</div>}
+      {/* Sync status */}
+      {syncInfo && (
+        <div className="mx-auto max-w-[1400px] px-3 sm:px-4 md:px-6 pt-2 text-xs text-neutral-400">
+          • {syncInfo}
+        </div>
+      )}
 
-        <div
-          ref={scrollRef}
-          className="mt-2 overflow-x-auto rounded-2xl border border-neutral-800"
-        >
-          <div className="min-w-[900px]">
-            {habits.map((h) => (
-              <HabitRow
-                key={h.id}
-                habit={h}
-                dim={dim}
-                ty={TY} tm={TM} td={TD}
-                getCell={getCell}
-                setCell={setCell}
-                scoreFor={scoreFor}
-                onEdit={()=>setEditingHabit(h)}
-                onRemove={()=>removeHabit(h.id)}
-              />
-            ))}
+      {/* GRID */}
+      <div className="mx-auto max-w-[1400px] px-3 sm:px-4 md:px-6 mt-2">
+        <div className="w-full overflow-x-auto rounded-2xl border border-neutral-800">
+          {/* İçerik yatay kaydırılabilir ve gün başlığı ile senkron */}
+          <div ref={scrollSyncRef} className="overflow-x-auto">
+            <table className="w-full md:min-w-[1100px]">
+              <tbody>
+                {habits.map((h) => (
+                  <tr key={h.id} className="odd:bg-neutral-950 even:bg-neutral-900/40 border-t border-neutral-900">
+                    {/* Sol Hedef Hücresi (sticky left) */}
+                    <td className="px-3 py-2 align-top sticky left-0 z-10 bg-neutral-950 w-[320px]">
+                      <div className="font-medium leading-tight">{h.title}</div>
+                      <div className="text-xs text-neutral-400">
+                        Birim: {UNIT_TYPES.find(u=>u.id===h.unit)?.label} · Hedef: {h.target}
+                      </div>
+                      <div className="mt-1 flex gap-2">
+                        <button onClick={() => setEditingHabit(h)} className="text-xs inline-flex items-center gap-1 px-2 py-1 rounded-lg border border-neutral-700 hover:bg-neutral-800">Düzenle</button>
+                        <button onClick={() => removeHabit(h.id)} className="text-xs inline-flex items-center gap-1 px-2 py-1 rounded-lg border border-red-700/70 text-red-300 hover:bg-red-900/20">Sil</button>
+                      </div>
+                    </td>
 
-            <div className="px-3 py-4">
-              <button
-                onClick={addHabit}
-                className="inline-flex items-center gap-2 px-3 py-2 rounded-xl bg-blue-600/20 border border-blue-500/40 hover:bg-blue-600/30 transition"
-              >
-                + Yeni hedef ekle
-              </button>
-            </div>
+                    {/* Gün hücreleri */}
+                    <td className="px-0 py-0">
+                      <div className="flex items-center gap-6 pr-4">
+                        {/* Günler */}
+                        <div className="flex items-center">
+                          {Array.from({ length: dim }, (_, i) => {
+                            const day = i + 1;
+                            const val = getCell(h.id, day);
+                            const score = scoreFor(h, day);
+                            const isToday = year === ty && month === tm && day === td;
+                            return (
+                              <div key={day} className="w-10 flex justify-center py-1">
+                                <button
+                                  onClick={() => setCell(h.id, day, cycleValue(h, val))}
+                                  onContextMenu={(e) => { e.preventDefault(); setCell(h.id, day, null); }}
+                                  className={`w-9 h-8 rounded-lg border text-sm select-none ${
+                                    score >= 1 ? 'bg-green-600/30 border-green-600/60'
+                                    : score > 0 ? 'bg-amber-600/20 border-amber-600/50'
+                                    : 'bg-neutral-900 border-neutral-800'
+                                  } ${isToday ? 'ring-2 ring-blue-500' : ''}`}
+                                  title="Sol tık: artır / sağ tık: temizle"
+                                >
+                                  {h.unit === 'check' ? (val ? '✓' : '') : (val ?? '')}
+                                </button>
+                              </div>
+                            );
+                          })}
+                        </div>
+
+                        {/* %Tamam */}
+                        <div className="w-16 text-right pr-1 text-sm">
+                          {(() => {
+                            let s = 0; for (let d = 1; d <= dim; d++) s += scoreFor(h, d);
+                            const pct = Math.round((s / dim) * 100);
+                            return <span className={pct>=80?'text-green-400':'text-neutral-300'}>{pct}%</span>;
+                          })()}
+                        </div>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+                <tr>
+                  <td className="px-3 py-3" colSpan={2}>
+                    <button onClick={addHabit} className="inline-flex items-center gap-2 px-3 py-2 rounded-xl bg-blue-600/20 border border-blue-500/40 hover:bg-blue-600/30">+ Yeni hedef ekle</button>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
           </div>
         </div>
 
-        <div className="mt-4 text-sm text-neutral-400">
+        <div className="mt-6 text-sm text-neutral-400">
           İpucu: Hücreye tıklayınca değer artar, sağ tıkla temizlenir. %80 ve üzeri günler streak sayılır.
         </div>
       </div>
 
-      {/* Drawer (mobil) */}
-      <Drawer open={drawerOpen} onClose={()=>setDrawerOpen(false)}>
-        <MobileControls
-          year={year} month={month}
-          setYear={setYear} setMonth={setMonth}
-          onCloudLoad={handleCloudLoad}
-          onCloudSave={handleCloudSave}
-          session={session} user={user}
-          onSignIn={signInWithEmail}
-          onSignOut={signOut}
-          title={title} setTitle={setTitle}
-        />
-      </Drawer>
-
-      {/* Modals */}
+      {/* Editör Modal */}
       {editingHabit && (
         <HabitEditor
           habit={editingHabit}
-          onClose={()=>setEditingHabit(null)}
-          onSave={(upd)=>{ setHabits(prev=>prev.map(x=>x.id===upd.id?upd:x)); setEditingHabit(null); }}
+          onClose={() => setEditingHabit(null)}
+          onSave={(updated) => {
+            setHabits((prev) => prev.map((h) => (h.id === updated.id ? updated : h)));
+            setEditingHabit(null);
+          }}
+        />
+      )}
+
+      {/* Ayarlar Modal */}
+      {showSettings && <SettingsPanel onClose={() => setShowSettings(false)} />}
+
+      {/* Mobil Drawer */}
+      {drawerOpen && (
+        <MobileControls
+          onClose={() => setDrawerOpen(false)}
+          month={month}
+          setMonth={setMonth}
+          year={year}
+          setYear={setYear}
+          onExport={exportJSON}
+          onImport={importJSON}
+          onClear={clearMonth}
+          onLoad={handleCloudLoad}
+          onSave={handleCloudSave}
+          session={session}
+          user={user}
+          onSignIn={signInWithEmail}
+          onSignOut={signOut}
+          title={title}
+          setTitle={setTitle}
         />
       )}
     </div>
   );
 }
 
-// ========================= Components =========================
-function HeaderBar({
-  title, setTitle, year, month, setYear, setMonth,
-  session, user, onSignOut, onOpenDrawer, onCloudLoad, onCloudSave, isMobile
-}) {
+// -------------------- Alt Bileşenler --------------------
+function StatCard({ label, value, progress }) {
   return (
-    <div className="flex items-center gap-2">
-      <input
-        className="bg-transparent text-xl sm:text-2xl font-semibold outline-none border-b border-neutral-800 focus:border-neutral-400 flex-1 min-w-0"
-        value={title}
-        onChange={e=>setTitle(e.target.value)}
-      />
-
-      {/* Desktop controls */}
-      <div className="hidden md:flex items-center gap-2">
-        <select
-          className="bg-neutral-900 border border-neutral-700 rounded-xl px-3 py-2"
-          value={month} onChange={e=>setMonth(Number(e.target.value))}
-        >
-          {Array.from({ length: 12 }, (_, i) => <option key={i} value={i}>{monthNameTR(i)}</option>)}
-        </select>
-        <input
-          type="number"
-          className="bg-neutral-900 border border-neutral-700 rounded-xl px-3 py-2 w-24"
-          value={year} onChange={e=>setYear(Number(e.target.value))}
-        />
-        <button onClick={onCloudLoad} className="bg-neutral-900 border border-neutral-700 rounded-xl px-3 py-2 hover:bg-neutral-800">Buluttan yükle</button>
-        <button onClick={onCloudSave} className="bg-blue-600 text-white rounded-xl px-3 py-2 hover:bg-blue-500">Buluta kaydet</button>
-
-        {session ? (
-          <div className="flex items-center gap-2">
-            <span className="text-sm text-neutral-300">{user?.email}</span>
-            <span className="text-xs px-2 py-1 rounded-lg border border-green-600/50 text-green-300">Bulut: Kullanıcı</span>
-            <button onClick={onSignOut} className="px-3 py-2 rounded-xl bg-neutral-900 border border-neutral-700 hover:bg-neutral-800">Çıkış</button>
-          </div>
-        ) : (
-          <span className="text-xs px-2 py-1 rounded-lg border border-neutral-600/50 text-neutral-300">Bulut: Cihaz</span>
-        )}
-      </div>
-
-      {/* Mobile: open drawer */}
-      <button
-        onClick={onOpenDrawer}
-        className="md:hidden inline-flex items-center gap-2 px-3 py-2 rounded-xl border border-neutral-700 hover:bg-neutral-800"
-        aria-label="Menüyü aç"
-      >
-        ☰ Menü
-      </button>
-    </div>
-  );
-}
-
-function StatCard({ label, value }) {
-  return (
-    <div className="rounded-2xl bg-neutral-900 border border-neutral-800 p-4">
-      <div className="text-neutral-400 text-sm">{label}</div>
-      <div className="text-2xl font-semibold mt-1">{value}</div>
-    </div>
-  );
-}
-
-function Progress({ value }) {
-  const v = Math.max(0, Math.min(100, Number(value) || 0));
-  return (
-    <div className="w-full">
-      <div className="flex items-center justify-between mb-1">
-        <span>{v}%</span>
-        <button
-          className="text-xs px-2 py-0.5 rounded-lg border border-neutral-700 hover:bg-neutral-800"
-          title="Sıfırla"
-          onClick={(e)=>{ e.preventDefault(); /* sadece görsel */ }}
-        >
-          Başla
-        </button>
-      </div>
-      <div className="h-2 rounded-full bg-neutral-800">
-        <div className="h-2 rounded-full bg-blue-500 transition-all" style={{ width: `${v}%` }} />
-      </div>
-    </div>
-  );
-}
-
-function HabitRow({ habit, dim, ty, tm, td, getCell, setCell, scoreFor, onEdit, onRemove }) {
-  return (
-    <div className="grid grid-cols-[320px_1fr_80px] odd:bg-neutral-950 even:bg-neutral-900/40 border-t border-neutral-900">
-      {/* sticky first col */}
-      <div className="px-3 py-2 sticky left-0 z-10 bg-neutral-950">
-        <div className="font-medium leading-tight">{habit.title}</div>
-        <div className="text-xs text-neutral-400">
-          Birim: {UNIT_TYPES.find(u=>u.id===habit.unit)?.label} · Hedef: {habit.target}
+    <div className="rounded-2xl bg-neutral-900 border border-neutral-800 p-4 min-w-0">
+      <div className="text-neutral-400 text-xs sm:text-sm truncate">{label}</div>
+      <div className="text-xl sm:text-2xl font-semibold mt-1">{value}</div>
+      {typeof progress === 'number' && (
+        <div className="mt-2 h-2 rounded-full bg-neutral-800 overflow-hidden">
+          <div
+            className="h-2 rounded-full bg-blue-500"
+            style={{ width: `${Math.max(0, Math.min(100, progress))}%` }}
+          />
         </div>
-        <div className="mt-1 flex gap-2">
-          <button onClick={onEdit} className="text-xs inline-flex items-center gap-1 px-2 py-1 rounded-lg border border-neutral-700 hover:bg-neutral-800">Düzenle</button>
-          <button onClick={onRemove} className="text-xs inline-flex items-center gap-1 px-2 py-1 rounded-lg border border-red-700/70 text-red-300 hover:bg-red-900/20">Sil</button>
-        </div>
-      </div>
-
-      {/* cells */}
-      <div className="overflow-x-hidden px-1 py-1">
-        <div className="flex">
-          {Array.from({ length: dim }, (_, i) => {
-            const day = i + 1;
-            const val = getCell(habit.id, day);
-            const score = scoreFor(habit, day);
-            const isToday = ty && tm && td && (day===td);
-            return (
-              <button
-                key={day}
-                onClick={() => setCell(habit.id, day, cycleValue(habit, val))}
-                onContextMenu={(e)=>{ e.preventDefault(); setCell(habit.id, day, null); }}
-                className={`w-10 h-8 m-0.5 rounded-lg border text-sm select-none transition
-                ${score >= 1 ? 'bg-green-600/30 border-green-600/60'
-                  : score > 0 ? 'bg-amber-600/20 border-amber-600/50'
-                  : 'bg-neutral-900 border-neutral-800'}
-                ${isToday ? 'ring-2 ring-blue-500' : ''}`}
-                title="Sol tık: artır · Sağ tık: temizle"
-              >
-                {habit.unit === 'check' ? (val ? '✓' : '') : (val ?? '')}
-              </button>
-            );
-          })}
-        </div>
-      </div>
-
-      {/* % */}
-      <div className="px-2 py-1 text-center text-sm flex items-center justify-center">
-        {(() => {
-          let s = 0; for (let d = 1; d <= dim; d++) s += scoreFor(habit, d);
-          const pct = Math.round((s / dim) * 100);
-          return <span className={pct>=80?'text-green-400':'text-neutral-300'}>{pct}%</span>;
-        })()}
-      </div>
+      )}
     </div>
   );
 }
 
 function HabitEditor({ habit, onClose, onSave }) {
-  const [title, setTitle]   = useState(habit.title);
-  const [unit, setUnit]     = useState(habit.unit);
+  const [title, setTitle] = useState(habit.title);
+  const [unit, setUnit] = useState(habit.unit);
   const [target, setTarget] = useState(habit.target);
 
   return (
@@ -560,82 +655,161 @@ function HabitEditor({ habit, onClose, onSave }) {
   );
 }
 
-function Drawer({ open, onClose, children }) {
+function SettingsPanel({ onClose }) {
   return (
-    <div className={`fixed inset-0 z-50 transition ${open ? 'pointer-events-auto' : 'pointer-events-none'}`}>
-      <div
-        className={`absolute inset-0 bg-black/50 backdrop-blur-sm transition-opacity ${open ? 'opacity-100' : 'opacity-0'}`}
-        onClick={onClose}
-      />
-      <div className={`absolute right-0 top-0 h-full w-[92%] max-w-[420px] bg-neutral-950 border-l border-neutral-800 p-4 transition-transform ${open ? 'translate-x-0' : 'translate-x-full'}`}>
+    <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+      <div className="w-full max-w-2xl rounded-2xl bg-neutral-950 border border-neutral-800 p-4">
         <div className="flex items-center justify-between mb-3">
-          <div className="text-lg font-semibold">Menü</div>
+          <div className="text-lg font-semibold">Ayarlar</div>
           <button onClick={onClose} className="text-neutral-400 hover:text-neutral-200">Kapat</button>
         </div>
-        {children}
+        <div className="space-y-2 text-sm text-neutral-300">
+          <p>• Veriler tarayıcıda <b>localStorage</b>'da saklanır. JSON dışa aktarım ile yedek alabilirsin.</p>
+          <p>• Hücreye <b>sol tık</b> → artır; <b>sağ tık</b> → temizle.</p>
+          <p>• Streak: Gün ortalaması ≥%80 olduğunda ardışık gün sayısı artar.</p>
+        </div>
       </div>
+    </div>
+  );
+}
+
+function AuthPanel({ onSignIn, onSignOut, session, user, compact }) {
+  const [email, setEmail] = useState('');
+  if (session) {
+    return (
+      <div className={`flex items-center gap-2 ${compact ? 'text-sm' : ''}`}>
+        <span className="text-sm text-neutral-300">{user?.email}</span>
+        <span className="text-xs px-2 py-1 rounded-lg border border-green-600/50 text-green-300">Bulut: Kullanıcı</span>
+        <button onClick={onSignOut} className="px-3 py-2 rounded-xl bg-neutral-900 border border-neutral-700 hover:bg-neutral-800">Çıkış</button>
+      </div>
+    );
+  }
+  return (
+    <div className={`flex items-center gap-2 ${compact ? 'hidden md:flex' : ''}`}>
+      <input
+        value={email}
+        onChange={(e)=>setEmail(e.target.value)}
+        placeholder="email@ornek.com"
+        className="bg-neutral-900 border border-neutral-700 rounded-xl px-3 py-2"
+      />
+      <span className="text-xs px-2 py-1 rounded-lg border border-neutral-600/50 text-neutral-300">Bulut: Cihaz</span>
+      <button
+        onClick={()=>email && onSignIn(email)}
+        className="px-3 py-2 rounded-xl bg-blue-600 text-white hover:bg-blue-500"
+      >
+        Giriş linki gönder
+      </button>
     </div>
   );
 }
 
 function MobileControls({
-  year, month, setYear, setMonth,
-  onCloudLoad, onCloudSave,
-  session, user, onSignIn, onSignOut,
-  title, setTitle
+  onClose, month, setMonth, year, setYear,
+  onExport, onImport, onClear, onLoad, onSave,
+  session, user, onSignIn, onSignOut, title, setTitle
 }) {
   const [email, setEmail] = useState('');
   return (
-    <div className="space-y-4">
-      <label className="grid gap-1">
-        <span className="text-sm text-neutral-300">Başlık</span>
-        <input value={title} onChange={e=>setTitle(e.target.value)} className="bg-neutral-900 border border-neutral-700 rounded-xl px-3 py-2"/>
-      </label>
-
-      <div className="flex gap-2">
-        <select
-          className="bg-neutral-900 border border-neutral-700 rounded-xl px-3 py-2 w-full"
-          value={month} onChange={e=>setMonth(Number(e.target.value))}
-        >
-          {Array.from({ length: 12 }, (_, i) => <option key={i} value={i}>{monthNameTR(i)}</option>)}
-        </select>
-        <input
-          type="number"
-          className="bg-neutral-900 border border-neutral-700 rounded-xl px-3 py-2 w-32"
-          value={year} onChange={e=>setYear(Number(e.target.value))}
-        />
-      </div>
-
-      <div className="flex gap-2">
-        <button onClick={onCloudLoad} className="flex-1 bg-neutral-900 border border-neutral-700 rounded-xl px-3 py-2 hover:bg-neutral-800">Buluttan yükle</button>
-        <button onClick={onCloudSave} className="flex-1 bg-blue-600 text-white rounded-xl px-3 py-2 hover:bg-blue-500">Buluta kaydet</button>
-      </div>
-
-      {session ? (
-        <div className="flex items-center justify-between gap-2 border border-neutral-800 rounded-xl p-3">
-          <div>
-            <div className="text-sm">{user?.email}</div>
-            <div className="text-xs text-green-300 mt-0.5">Bulut: Kullanıcı</div>
-          </div>
-          <button onClick={onSignOut} className="px-3 py-2 rounded-xl bg-neutral-900 border border-neutral-700 hover:bg-neutral-800">Çıkış</button>
+    <div className="fixed inset-0 z-[60]">
+      <div className="absolute inset-0 bg-black/50" onClick={onClose} />
+      <div className="absolute right-0 top-0 h-full w-[92%] max-w-sm bg-neutral-950 border-l border-neutral-800 p-4 overflow-y-auto">
+        <div className="flex items-center justify-between mb-3">
+          <div className="text-lg font-semibold">Menü</div>
+          <button onClick={onClose} className="text-neutral-400 hover:text-neutral-200">Kapat</button>
         </div>
-      ) : (
-        <div className="grid gap-2">
+
+        <div className="grid gap-3">
           <label className="grid gap-1">
-            <span className="text-sm text-neutral-300">E-posta ile giriş</span>
-            <input value={email} onChange={e=>setEmail(e.target.value)} placeholder="email@ornek.com" className="bg-neutral-900 border border-neutral-700 rounded-xl px-3 py-2"/>
+            <span className="text-sm text-neutral-300">Başlık</span>
+            <input
+              value={title}
+              onChange={(e)=>setTitle(e.target.value)}
+              className="bg-neutral-900 border border-neutral-700 rounded-xl px-3 py-2"
+            />
           </label>
-          <div className="flex items-center justify-between">
-            <span className="text-xs px-2 py-1 rounded-lg border border-neutral-600/50 text-neutral-300">Bulut: Cihaz</span>
-            <button
-              onClick={()=>email && onSignIn(email)}
-              className="px-3 py-2 rounded-xl bg-blue-600 text-white hover:bg-blue-500"
+
+          <div className="flex gap-2">
+            <select
+              className="bg-neutral-900 border border-neutral-700 rounded-xl px-3 py-2 flex-1"
+              value={month}
+              onChange={(e) => setMonth(Number(e.target.value))}
             >
-              Giriş linki gönder
-            </button>
+              {Array.from({ length: 12 }, (_, i) => (
+                <option key={i} value={i}>{monthNameTR(i)}</option>
+              ))}
+            </select>
+            <input
+              type="number"
+              className="bg-neutral-900 border border-neutral-700 rounded-xl px-3 py-2 w-28"
+              value={year}
+              onChange={(e) => setYear(Number(e.target.value))}
+            />
           </div>
+
+          <div className="flex gap-2">
+            <button onClick={onLoad} className="btn-ghost flex-1">Buluttan yükle</button>
+            <button onClick={onSave} className="btn-primary flex-1">Buluta kaydet</button>
+          </div>
+
+          <div className="flex gap-2">
+            <button onClick={onExport} className="btn-ghost flex-1">Dışa aktar</button>
+            <label className="btn-ghost flex-1 justify-center cursor-pointer">
+              İçe aktar
+              <input type="file" accept="application/json" className="hidden" onChange={(e) => e.target.files?.[0] && onImport(e.target.files[0])} />
+            </label>
+          </div>
+
+          <button onClick={onClear} className="btn-ghost w-full">Ayı temizle</button>
+
+          {/* Auth */}
+          {session ? (
+            <div className="mt-2 flex items-center justify-between gap-2">
+              <div className="text-sm text-neutral-300 truncate">{user?.email}</div>
+              <button onClick={onSignOut} className="px-3 py-2 rounded-xl bg-neutral-900 border border-neutral-700 hover:bg-neutral-800">Çıkış</button>
+            </div>
+          ) : (
+            <div className="mt-2 grid gap-2">
+              <input
+                value={email}
+                onChange={(e)=>setEmail(e.target.value)}
+                placeholder="email@ornek.com"
+                className="bg-neutral-900 border border-neutral-700 rounded-xl px-3 py-2"
+              />
+              <button
+                onClick={()=>email && onSignIn(email)}
+                className="px-3 py-2 rounded-xl bg-blue-600 text-white hover:bg-blue-500"
+              >
+                Giriş linki gönder
+              </button>
+              <div className="text-xs text-neutral-400">Bulut modu yoksa cihaz modunda çalışırsın.</div>
+            </div>
+          )}
         </div>
-      )}
+      </div>
     </div>
   );
 }
+
+/* -------- Küçük yardımcı buton stilleri (Tailwind kompozit sınıflar) --------
+   index.css'te yoksa eklemene gerek yok; utility sınıflardan oluşuyor. */
+function BtnBase({ className = '', ...props }) {
+  return <button className={`inline-flex items-center gap-2 rounded-xl px-3 py-2 ${className}`} {...props} />;
+}
+function Ghost(props){ return <BtnBase className="bg-neutral-900 border border-neutral-700 hover:bg-neutral-800" {...props}/>; }
+function Primary(props){ return <BtnBase className="bg-blue-600 text-white hover:bg-blue-500" {...props}/>; }
+
+// Tailwind-like kısayollar (JSX’te className ile kullandık)
+const btn = {
+  ghost: 'inline-flex items-center gap-2 bg-neutral-900 border border-neutral-700 rounded-xl px-3 py-2 hover:bg-neutral-800',
+  primary: 'inline-flex items-center gap-2 bg-blue-600 text-white rounded-xl px-3 py-2 hover:bg-blue-500'
+};
+// küçük sugar:
+function Button({ variant='ghost', className='', ...rest }) {
+  return <button className={`${btn[variant]} ${className}`} {...rest} />;
+}
+// kullanımlar:
+const btnGhost = btn.ghost;
+const btnPrimary = btn.primary;
+
+// className kısa isimleri (üstte kullandık)
+function cls() {}
