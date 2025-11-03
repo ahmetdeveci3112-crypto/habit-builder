@@ -1,6 +1,11 @@
 // @ts-nocheck
 import React, { useEffect, useMemo, useState } from 'react'
 
+/* src/index.css (dosyanın sonuna ekle) */
+.safe-top { padding-top: env(safe-area-inset-top); }
+.blur-surface { backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); }
+
+
 const UNIT_TYPES = [
   { id: 'check', label: 'Checkbox' },
   { id: 'count', label: 'Adet' },
